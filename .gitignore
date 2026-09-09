@@ -1,0 +1,13 @@
+/build/
+/.idea/
+/.vscode/
+*.exe
+*.elf
+*.bin
+*.hex
+*.map
+*.o
+*.obj
+*.log
+/verification/source-sha256.json
+/verification/source-check.txt
