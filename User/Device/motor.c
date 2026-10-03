@@ -62,6 +62,14 @@ void Motor_StopAll(void)
   }
 }
 
+void Motor_EmergencyStop(void)
+{
+  TIM2->CCR1 = 0U;
+  TIM2->CCR2 = 0U;
+  TIM2->CCR3 = 0U;
+  TIM2->CCR4 = 0U;
+}
+
 /* The mixer already clamps, but a compare value above the reload would wrap to
  * a near-zero duty rather than saturating, so this stays as a hard backstop. */
 static uint32_t Motor_ToCompare(float duty)

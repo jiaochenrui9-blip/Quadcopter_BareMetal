@@ -32,6 +32,8 @@
 #include "icm42688.h"
 #include "OLED.h"
 #include "remote_task.h"
+#include "motor.h"
+#include "watchdog.h"
 
 /* USER CODE END Includes */
 
@@ -116,6 +118,10 @@ int main(void)
     Error_Handler();
   }
 
+  /* Started last: everything above blocks for tens of milliseconds. From here
+   * on a main loop that stops turning for WATCHDOG_TIMEOUT_MS resets the chip. */
+  Watchdog_Start();
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -126,6 +132,7 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     BareMetal_Update();
+    Watchdog_Refresh();
   }
   /* USER CODE END 3 */
 }
@@ -241,6 +248,8 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
+  /* Props first: TIM2 keeps running its last duty after the CPU stops. */
+  Motor_EmergencyStop();
   __disable_irq();
   while (1)
   {
