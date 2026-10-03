@@ -30,6 +30,11 @@ HAL_StatusTypeDef Motor_Init(void);
 void Motor_Apply(const Motor_Output_t *output);
 void Motor_StopAll(void);
 
+/* Fault-path stop: writes the TIM2 compare registers directly. It needs no
+ * handle, no HAL state and no clock-enabled check, so it is safe to call from
+ * a fault handler or Error_Handler, where the rest of the program is suspect. */
+void Motor_EmergencyStop(void);
+
 #ifdef __cplusplus
 }
 #endif

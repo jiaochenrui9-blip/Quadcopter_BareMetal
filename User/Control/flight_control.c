@@ -23,10 +23,19 @@ static float pitch_zero;
 #define QUADCOPTER_OUTER_LOOP_DT_S     (QUADCOPTER_INNER_LOOP_DT_S * \
                                         (float)QUADCOPTER_OUTER_LOOP_DIVIDER)
 
+/* Rate-loop integral. A proportional-only rate loop leaves a steady error
+ * whenever the motors are not identical: the airframe settles tilted and the
+ * yaw drifts at a constant rate. The integral supplies the constant torque
+ * trim. Units: counts per (deg/s * s). The limit caps the trim itself, in
+ * counts, at about 3 % duty, so a wound-up integrator cannot dominate. */
+#define QUADCOPTER_RATE_KI_DEFAULT     5.0f
+#define QUADCOPTER_RATE_I_LIMIT        100.0f
+
 static void Quadcopter_AttitudeLoop_Update(const Attitude_Data_t *attitude);
 static void Quadcopter_RateLoop_Update(const IMU_Data_t *imu);
 static void Quadcopter_ResetAxis(Quadcopter_FlightControl_t *axis);
 static void Quadcopter_PWMOutput_Clear(void);
+static void Quadcopter_ClearIntegrators(void);
 
 void Quadcopter_FlightControl_Init(void)
 {
@@ -36,12 +45,15 @@ void Quadcopter_FlightControl_Init(void)
         -QUADCOPTER_RATE_SETPOINT_LIMIT,QUADCOPTER_RATE_SETPOINT_LIMIT,-1000,1000);
     PID_Init(&RollPID.Attitude_PID,15.0f,0.0f,0.0f,
         -QUADCOPTER_RATE_SETPOINT_LIMIT,QUADCOPTER_RATE_SETPOINT_LIMIT,-1000,1000);
-    PID_Init(&PitchPID.Omega_PID,3.0f,0.0f,0.0f,
-        -QUADCOPTER_PID_OUTPUT_LIMIT,QUADCOPTER_PID_OUTPUT_LIMIT,-1000,1000);
-    PID_Init(&RollPID.Omega_PID,3.0f,0.0f,0.0f,
-        -QUADCOPTER_PID_OUTPUT_LIMIT,QUADCOPTER_PID_OUTPUT_LIMIT,-1000,1000);
-    PID_Init(&YawPID,3.0f,0.0f,0.0f,
-        -QUADCOPTER_PID_OUTPUT_LIMIT,QUADCOPTER_PID_OUTPUT_LIMIT,-1000,1000);
+    PID_Init(&PitchPID.Omega_PID,3.0f,QUADCOPTER_RATE_KI_DEFAULT,0.0f,
+        -QUADCOPTER_PID_OUTPUT_LIMIT,QUADCOPTER_PID_OUTPUT_LIMIT,
+        -QUADCOPTER_RATE_I_LIMIT,QUADCOPTER_RATE_I_LIMIT);
+    PID_Init(&RollPID.Omega_PID,3.0f,QUADCOPTER_RATE_KI_DEFAULT,0.0f,
+        -QUADCOPTER_PID_OUTPUT_LIMIT,QUADCOPTER_PID_OUTPUT_LIMIT,
+        -QUADCOPTER_RATE_I_LIMIT,QUADCOPTER_RATE_I_LIMIT);
+    PID_Init(&YawPID,3.0f,QUADCOPTER_RATE_KI_DEFAULT,0.0f,
+        -QUADCOPTER_PID_OUTPUT_LIMIT,QUADCOPTER_PID_OUTPUT_LIMIT,
+        -QUADCOPTER_RATE_I_LIMIT,QUADCOPTER_RATE_I_LIMIT);
     Quadcopter_FlightControl_Inhibit();
 }
 
@@ -130,6 +142,14 @@ void Quadcopter_FlightControl_Update(const Attitude_Data_t *attitude,
         return;
     }
 
+    /* The mixer holds the motors off at idle throttle, so the loops cannot act
+     * on the airframe and an integrator would only wind up against the ground.
+     * Keep it empty until the aircraft is actually being flown. */
+    if (pwm_output.throttle_pwm <= (float)REMOTE_ARM_THROTTLE_MAX)
+    {
+        Quadcopter_ClearIntegrators();
+    }
+
     if (outer_loop_tick == 0U)
     {
         Quadcopter_AttitudeLoop_Update(attitude);
@@ -163,6 +183,15 @@ static void Quadcopter_RateLoop_Update(const IMU_Data_t *imu)
                                         QUADCOPTER_INNER_LOOP_DT_S);
     pwm_output.yaw_pwm = PID_Calculate(&YawPID, imu->gyro_dps[2],
                                        QUADCOPTER_INNER_LOOP_DT_S);
+}
+
+static void Quadcopter_ClearIntegrators(void)
+{
+    PitchPID.Attitude_PID.integral = 0.0f;
+    RollPID.Attitude_PID.integral = 0.0f;
+    PitchPID.Omega_PID.integral = 0.0f;
+    RollPID.Omega_PID.integral = 0.0f;
+    YawPID.integral = 0.0f;
 }
 
 static void Quadcopter_ResetAxis(Quadcopter_FlightControl_t *axis)

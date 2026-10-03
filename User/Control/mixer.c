@@ -15,9 +15,14 @@
   *          /           \
   *      M4 (CCW)       M3 (CW)
   *
-  * Body frame follows the attitude filter: x forward, y left, z up. So a
-  * positive roll drops the right side, a positive pitch raises the nose, and a
-  * positive yaw turns the nose left.
+  * Body frame follows the attitude filter: x forward, y left, z up, with
+  * right-handed rotations. So a positive roll raises the left side (drops the
+  * right side), a positive pitch LOWERS the nose (rotation about +y takes +z
+  * toward +x), and a positive yaw turns the nose left.
+  *
+  * Each loop output has to push its own measured angle UP when it is positive,
+  * otherwise the loop is positive feedback. Hence a positive pitch correction
+  * speeds up the REAR motors (nose down), the opposite of the roll column.
   ******************************************************************************
   */
 
@@ -26,7 +31,7 @@
 /* Sign of each correction per motor, in motor index order M1..M4. Flip a
  * column here if a bench test shows an axis fighting instead of correcting. */
 static const float mixer_roll_sign[MOTOR_COUNT]  = { +1.0f, -1.0f, -1.0f, +1.0f };
-static const float mixer_pitch_sign[MOTOR_COUNT] = { +1.0f, +1.0f, -1.0f, -1.0f };
+static const float mixer_pitch_sign[MOTOR_COUNT] = { -1.0f, -1.0f, +1.0f, +1.0f };
 static const float mixer_yaw_sign[MOTOR_COUNT]   = { +1.0f, -1.0f, +1.0f, -1.0f };
 
 static float Mixer_Clamp(float value, float min, float max);

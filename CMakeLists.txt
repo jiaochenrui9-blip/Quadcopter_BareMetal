@@ -53,6 +53,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     User/Device/OLED_Data.c
     User/Device/motor.c
     User/Device/nrf24_rx.c
+    User/Device/watchdog.c
     User/Task/baremetal.c
     User/Task/remote_task.c
     User/Task/display.c

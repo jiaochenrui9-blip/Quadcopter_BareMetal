@@ -20,6 +20,16 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Host build failed' }
     & ./verification/test_icm42688.exe
     if ($LASTEXITCODE -ne 0) { throw 'Host tests failed' }
+
+    # Closed-loop sign/stability check against a rigid-body model.
+    & $Compiler -std=c11 -Wall -Wextra -Werror `
+        -Iverification/icm_stubs -IUser/Device -IUser/Task -IUser/Control -IUser/Estimate `
+        verification/test_control_sign.c User/Estimate/attitude.c `
+        User/Control/flight_control.c User/Control/PID.c User/Control/mixer.c `
+        -lm -o verification/test_control_sign.exe
+    if ($LASTEXITCODE -ne 0) { throw 'Control sign test build failed' }
+    & ./verification/test_control_sign.exe
+    if ($LASTEXITCODE -ne 0) { throw 'Control sign test failed' }
 } finally {
     Pop-Location
 }
