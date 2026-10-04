@@ -1,5 +1,5 @@
 #include "baremetal.h"
-#include "icm42688.h"
+#include "mpu6050.h"
 #include "imu_task.h"
 #include "flight_control.h"
 #include "mixer.h"
@@ -10,7 +10,7 @@
 #define IMU_STALE_TIMEOUT_MS 20U
 #define DISPLAY_PERIOD_MS 100U
 
-volatile uint8_t ICM42688_Ready;
+volatile uint8_t MPU6050_Ready;
 volatile uint8_t Remote_Ready;
 volatile uint8_t g_gyro_calibrated;
 volatile uint8_t g_attitude_zero_calibrated;
@@ -60,14 +60,14 @@ static uint8_t BareMetal_TakeFlag(volatile uint8_t *flag)
 
 HAL_StatusTypeDef BareMetal_Init(const NRF24_RX_Handle_t *radio)
 {
-    ICM42688_Ready = Remote_Ready = 0U;
+    MPU6050_Ready = Remote_Ready = 0U;
     g_gyro_calibrated = g_attitude_zero_calibrated = 0U;
     g_imu_drdy_count = g_imu_coalesced_count = 0U;
     g_imu_frame_count = g_imu_error_count = 0U;
     attitude_zero_sample_count = 0U;
     attitude_zero_roll_sum = attitude_zero_pitch_sum = 0.0f;
     if (Motor_Init() != HAL_OK) return HAL_ERROR;
-    if (ICM42688_Init() != HAL_OK) return HAL_ERROR;
+    if (MPU6050_Init() != HAL_OK) return HAL_ERROR;
     Attitude_Init();
     Quadcopter_FlightControl_Init();
     (void)RemoteTask_Init(radio);
@@ -75,14 +75,14 @@ HAL_StatusTypeDef BareMetal_Init(const NRF24_RX_Handle_t *radio)
     Display_Init();
     last_imu_ms = last_display_ms = HAL_GetTick();
     /* 1000 fresh gyro frames averaged inside the driver. Keep stationary. */
-    return ICM42688_EnableDataReadyInterrupt();
+    return MPU6050_EnableDataReadyInterrupt();
 }
 
 static void BareMetal_ProcessFrame(void)
 {
     if (!g_gyro_calibrated)
     {
-        if (ICM42688_GyroCalibrationIsComplete())
+        if (MPU6050_GyroCalibrationIsComplete())
         {
             g_gyro_calibrated = 1U;
             Attitude_AlignToAccel(&g_imu_data);
@@ -90,7 +90,7 @@ static void BareMetal_ProcessFrame(void)
         }
         return;
     }
-    Attitude_Update(&g_imu_data, ICM42688_SAMPLE_PERIOD_S);
+    Attitude_Update(&g_imu_data, MPU6050_SAMPLE_PERIOD_S);
     Attitude_GetData(&g_attitude_data);
     if (!g_attitude_zero_calibrated)
     {
@@ -124,7 +124,7 @@ void BareMetal_Update(void)
         (uint32_t)(HAL_GetTick() - last_imu_ms) >= IMU_STALE_TIMEOUT_MS)
         BareMetal_Stop();
 
-    status = ICM42688_Consume(&g_imu_data);
+    status = MPU6050_Consume(&g_imu_data);
     if (status == HAL_OK)
     {
         last_imu_ms = HAL_GetTick();
@@ -137,9 +137,9 @@ void BareMetal_Update(void)
         BareMetal_Stop();
     }
 
-    if (!ICM42688_IsBusy() && BareMetal_TakeFlag(&ICM42688_Ready))
+    if (!MPU6050_IsBusy() && BareMetal_TakeFlag(&MPU6050_Ready))
     {
-        status = ICM42688_StartDmaRead();
+        status = MPU6050_StartDmaRead();
         if (status != HAL_OK && status != HAL_BUSY)
         {
             ++g_imu_error_count;
@@ -149,7 +149,7 @@ void BareMetal_Update(void)
 
     /* Display formatting is slow background work: wait until calibration ends
      * and no IMU transfer is pending. DMA panel transfers themselves overlap IMU. */
-    if (g_attitude_zero_calibrated && !ICM42688_IsBusy() && !ICM42688_Ready &&
+    if (g_attitude_zero_calibrated && !MPU6050_IsBusy() && !MPU6050_Ready &&
         !OLED_IsBusy() && (uint32_t)(HAL_GetTick() - last_display_ms) >= DISPLAY_PERIOD_MS)
     {
         last_display_ms = HAL_GetTick();

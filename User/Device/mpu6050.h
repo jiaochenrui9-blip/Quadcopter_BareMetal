@@ -1,49 +1,29 @@
-/**
-  ******************************************************************************
-  * @file    mpu6050.h
-  * @brief   MPU6050 I2C DMA driver interface.
-  ******************************************************************************
-  */
-#ifndef __MPU6050_H__
-#define __MPU6050_H__
-
-#ifdef __cplusplus
-extern "C" {
-#endif
+#ifndef MPU6050_H
+#define MPU6050_H
 
 #include "main.h"
+#include "imu_data.h"
 
-/* DATA_RDY output of the MPU6050. Push-pull active high, so the EXTI triggers
- * on the rising edge. */
-#define MPU6050_INT_PORT              GPIOB
-#define MPU6050_INT_PIN               GPIO_PIN_0
+/* I2C2 on PB10 SCL / PB11 SDA (400 kHz, DMA1 Channel5 RX). AD0 is tied low on
+ * the board, so the 7-bit address is 0x68. DATA_RDY leaves on the GYRO_INT net
+ * (PB0, EXTI0, rising edge) as a push-pull active-high pulse. Pin names come
+ * from the .ioc labels, so moving a pin there is picked up here. */
+#define MPU6050_INT_PORT GYRO_INT_GPIO_Port
+#define MPU6050_INT_PIN GYRO_INT_Pin
+#define MPU6050_GYRO_CALIBRATION_SAMPLES 1000U
+/* DLPF on (CONFIG=3) fixes the gyro output rate at 1 kHz; SMPLRT_DIV=0 keeps it. */
+#define MPU6050_SAMPLE_PERIOD_S 0.001F
 
-typedef struct
-{
-  float acc_g[3];
-  float gyro_dps[3];
-  float temperature_deg_c;
-} MPU6050_Data_t;
-
-/* Initializes MPU6050 with accelerometer ±8 g and gyroscope ±500 °/s. */
 HAL_StatusTypeDef MPU6050_Init(void);
-
-/* Starts one 14-byte MPU6050 register read through I2C2 RX DMA. */
-HAL_StatusTypeDef MPU6050_StartDmaRead(void);
-
-/* Turns on the DATA_RDY output. Call it only once the consumer of the samples
- * exists, because the first completed read hands off through a semaphore. */
 HAL_StatusTypeDef MPU6050_EnableDataReadyInterrupt(void);
-
-/* Parses the completed DMA frame and updates converted MPU6050 data. */
-void MPU6050_Update(void);
-void MPU6050_I2CErrorCallback(void);
-void MPU6050_GetData(MPU6050_Data_t *data);
+HAL_StatusTypeDef MPU6050_StartDmaRead(void);
+uint8_t MPU6050_IsBusy(void);
+/* Main context: consume completed buffer, or reset I2C2 on timeout/error.
+ * HAL_BUSY = no new frame. No reuse until this function releases the buffer. */
+HAL_StatusTypeDef MPU6050_Consume(IMU_Data_t *data);
+void MPU6050_DmaCompleteCallback(void);
+void MPU6050_ErrorCallback(void);
 void MPU6050_GyroCalibrationStart(void);
 uint8_t MPU6050_GyroCalibrationIsComplete(void);
 
-#ifdef __cplusplus
-}
 #endif
-
-#endif /* __MPU6050_H__ */

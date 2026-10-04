@@ -1,273 +1,200 @@
-/**
-  ******************************************************************************
-  * @file    mpu6050.c
-  * @brief   MPU6050 I2C DMA driver.
-  *
-  * The raw samples and converted physical values deliberately have file scope;
-  * they cannot be accessed from other source files.
-  ******************************************************************************
-  */
-
 #include "mpu6050.h"
 #include "i2c.h"
+#include <string.h>
 
-#define MPU6050_I2C_ADDRESS           (0x68U << 1U)
+/* MPU-6000/MPU-6050 register map, rev 4.2. */
+#define MPU6050_ADDRESS (0x68U << 1U)
+#define REG_SMPLRT_DIV 0x19U
+#define REG_CONFIG 0x1AU
+#define REG_GYRO_CONFIG 0x1BU
+#define REG_ACCEL_CONFIG 0x1CU
+#define REG_INT_PIN_CFG 0x37U
+#define REG_INT_ENABLE 0x38U
+#define REG_INT_STATUS 0x3AU
+#define REG_PWR_MGMT_1 0x6BU
+#define REG_WHO_AM_I 0x75U
+#define WHO_AM_I_VALUE 0x68U
+#define INT_STATUS_DATA_RDY 0x01U
+#define I2C_TIMEOUT_MS 100U
+#define DMA_TIMEOUT_MS 5U
 
-#define MPU6050_REG_SMPLRT_DIV        0x19U
-#define MPU6050_REG_CONFIG            0x1AU
-#define MPU6050_REG_GYRO_CONFIG       0x1BU
-#define MPU6050_REG_ACCEL_CONFIG      0x1CU
-#define MPU6050_REG_INT_PIN_CFG       0x37U
-#define MPU6050_REG_INT_ENABLE        0x38U
-#define MPU6050_REG_ACCEL_XOUT_H      0x3BU
-#define MPU6050_REG_PWR_MGMT_1        0x6BU
-#define MPU6050_REG_WHO_AM_I          0x75U
+/* One burst: INT_STATUS (0x3A), then ACCEL_XOUT_H..GYRO_ZOUT_L (0x3B..0x48).
+ * Reading the status inside the burst tells Consume whether the sample is new
+ * without a second I2C transaction in the main loop. */
+#define FRAME_BYTES 15U
+#define FRAME_ACCEL 1U
+#define FRAME_TEMP 7U
+#define FRAME_GYRO 9U
 
-/* Push-pull, active high, 50 us pulse, and any read clears the status flag so
- * it cannot latch up. Matches the rising-edge EXTI on MPU6050_INT_PIN. */
-#define MPU6050_INT_PIN_CFG_VALUE     0x10U
-#define MPU6050_INT_DATA_RDY_EN       0x01U
+#define ACCEL_LSB_PER_G 4096.0F /* +/-8 g */
+#define GYRO_LSB_PER_DPS 65.5F /* +/-500 dps */
+#define TEMP_LSB_PER_DEG_C 340.0F
+#define TEMP_OFFSET_DEG_C 36.53F
 
-#define MPU6050_WHO_AM_I_VALUE        0x68U
-#define MPU6050_SAMPLE_BYTES          14U
+/* Measured earlier with the airframe level and stationary. */
+#define ACCEL_X_OFFSET_G 0.104004F
+#define ACCEL_Y_OFFSET_G 0.028441F
+#define ACCEL_Z_OFFSET_G (-0.068359F)
 
-#define MPU6050_ACCEL_LSB_PER_G       4096.0F
-#define MPU6050_GYRO_LSB_PER_DPS      65.5F
-#define MPU6050_TEMP_LSB_PER_DEG_C    340.0F
-#define MPU6050_TEMP_OFFSET_DEG_C     36.53F
-#define MPU6050_GYRO_CALIBRATION_SAMPLE_COUNT 1000U
+static int32_t gyro_sum[3];
+static float gyro_offset[3];
+static uint32_t calibration_count;
+static uint8_t calibration_active;
+/* 0 idle, 1 DMA active, 2 complete/unconsumed, 3 error. */
+static volatile uint8_t dma_state;
+static uint8_t dma_rx[FRAME_BYTES];
+static uint32_t dma_started_ms;
 
-/* Measured while the airframe was placed level and stationary. */
-#define MPU6050_ACCEL_X_OFFSET_G       0.104004F
-#define MPU6050_ACCEL_Y_OFFSET_G       0.028441F
-#define MPU6050_ACCEL_Z_OFFSET_G      -0.068359F
-
-typedef struct
+static HAL_StatusTypeDef ReadRegister(uint8_t reg, uint8_t *value)
 {
-  int16_t accel_x;
-  int16_t accel_y;
-  int16_t accel_z;
-  int16_t temperature;
-  int16_t gyro_x;
-  int16_t gyro_y;
-  int16_t gyro_z;
-} MPU6050_RawData_t;
-
-static uint8_t mpu6050_rx_buffer[MPU6050_SAMPLE_BYTES];
-static volatile MPU6050_RawData_t mpu6050_raw_data;
-static volatile MPU6050_Data_t mpu6050_data;
-static volatile uint32_t mpu6050_data_sequence;
-static volatile uint8_t mpu6050_initialized;
-static volatile uint8_t mpu6050_dma_busy;
-static volatile float mpu6050_gyro_offset_dps[3];
-static float mpu6050_gyro_calibration_sum_dps[3];
-static volatile uint16_t mpu6050_gyro_calibration_count;
-static volatile uint8_t mpu6050_gyro_calibration_active;
-
-static HAL_StatusTypeDef MPU6050_WriteRegister(uint8_t reg, uint8_t value);
-static int16_t MPU6050_CombineBytes(uint8_t msb, uint8_t lsb);
-static void MPU6050_ConvertUnits(void);
-
-HAL_StatusTypeDef MPU6050_Init(void)
-{
-  uint8_t who_am_i = 0U;
-  uint8_t reset_command = 0x80U;
-  uint8_t clock_source = 0x01U;
-  uint8_t sample_divider = 0x00U;
-  uint8_t low_pass_filter = 0x03U;
-  uint8_t gyro_range_500_dps = 0x08U;
-  uint8_t accel_range_8_g = 0x10U;
-
-  mpu6050_initialized = 0U;
-  mpu6050_dma_busy = 0U;
-
-  if (MPU6050_WriteRegister(MPU6050_REG_PWR_MGMT_1, reset_command) != HAL_OK)
-  {
-    return HAL_ERROR;
-  }
-  HAL_Delay(100U);
-
-  if (HAL_I2C_Mem_Read(&hi2c2, MPU6050_I2C_ADDRESS, MPU6050_REG_WHO_AM_I,
-                       I2C_MEMADD_SIZE_8BIT, &who_am_i, 1U, 100U) != HAL_OK)
-  {
-    return HAL_ERROR;
-  }
-  if (who_am_i != MPU6050_WHO_AM_I_VALUE)
-  {
-    return HAL_ERROR;
-  }
-
-  if ((MPU6050_WriteRegister(MPU6050_REG_PWR_MGMT_1, clock_source) != HAL_OK) ||
-      (MPU6050_WriteRegister(MPU6050_REG_SMPLRT_DIV, sample_divider) != HAL_OK) ||
-      (MPU6050_WriteRegister(MPU6050_REG_CONFIG, low_pass_filter) != HAL_OK) ||
-      (MPU6050_WriteRegister(MPU6050_REG_GYRO_CONFIG, gyro_range_500_dps) != HAL_OK) ||
-      (MPU6050_WriteRegister(MPU6050_REG_ACCEL_CONFIG, accel_range_8_g) != HAL_OK))
-  {
-    return HAL_ERROR;
-  }
-
-  mpu6050_initialized = 1U;
-  return HAL_OK;
+    return HAL_I2C_Mem_Read(&hi2c2, MPU6050_ADDRESS, reg, I2C_MEMADD_SIZE_8BIT,
+                            value, 1U, I2C_TIMEOUT_MS);
 }
 
-HAL_StatusTypeDef MPU6050_EnableDataReadyInterrupt(void)
+static HAL_StatusTypeDef WriteRegister(uint8_t reg, uint8_t value)
 {
-  if (mpu6050_initialized == 0U)
-  {
-    return HAL_ERROR;
-  }
-
-  if (MPU6050_WriteRegister(MPU6050_REG_INT_PIN_CFG,
-                            MPU6050_INT_PIN_CFG_VALUE) != HAL_OK)
-  {
-    return HAL_ERROR;
-  }
-
-  return MPU6050_WriteRegister(MPU6050_REG_INT_ENABLE,
-                               MPU6050_INT_DATA_RDY_EN);
+    return HAL_I2C_Mem_Write(&hi2c2, MPU6050_ADDRESS, reg, I2C_MEMADD_SIZE_8BIT,
+                             &value, 1U, I2C_TIMEOUT_MS);
 }
 
-HAL_StatusTypeDef MPU6050_StartDmaRead(void)
+static HAL_StatusTypeDef Configure(uint8_t reg, uint8_t value)
 {
-  HAL_StatusTypeDef status;
-
-  if ((mpu6050_initialized == 0U) || (mpu6050_dma_busy != 0U))
-  {
-    return HAL_BUSY;
-  }
-
-  mpu6050_dma_busy = 1U;
-  status = HAL_I2C_Mem_Read_DMA(&hi2c2, MPU6050_I2C_ADDRESS,
-                                MPU6050_REG_ACCEL_XOUT_H,
-                                I2C_MEMADD_SIZE_8BIT, mpu6050_rx_buffer,
-                                MPU6050_SAMPLE_BYTES);
-  if (status != HAL_OK)
-  {
-    mpu6050_dma_busy = 0U;
-  }
-
-  return status;
+    uint8_t actual;
+    if (WriteRegister(reg, value) != HAL_OK) return HAL_ERROR;
+    if (ReadRegister(reg, &actual) != HAL_OK) return HAL_ERROR;
+    return (actual == value) ? HAL_OK : HAL_ERROR;
 }
 
-void MPU6050_GetData(MPU6050_Data_t *data)
+static int16_t SignedBE(const uint8_t *p)
 {
-  uint32_t sequence_before;
-  uint32_t sequence_after;
+    uint16_t value = ((uint16_t)p[0] << 8) | p[1];
+    return (int16_t)((int32_t)value - ((value & 0x8000U) ? 65536 : 0));
+}
 
-  if (data == NULL)
-  {
-    return;
-  }
-
-  /* An odd sequence means a write is in progress, so retry rather than copy.
-   * A do-while cannot express that: continue would jump to the condition and
-   * read sequence_after before it was ever assigned. */
-  for (;;)
-  {
-    sequence_before = mpu6050_data_sequence;
-    if ((sequence_before & 1U) != 0U)
-    {
-      continue;
-    }
-
-    data->acc_g[0] = mpu6050_data.acc_g[0];
-    data->acc_g[1] = mpu6050_data.acc_g[1];
-    data->acc_g[2] = mpu6050_data.acc_g[2];
-    data->gyro_dps[0] = mpu6050_data.gyro_dps[0];
-    data->gyro_dps[1] = mpu6050_data.gyro_dps[1];
-    data->gyro_dps[2] = mpu6050_data.gyro_dps[2];
-    data->temperature_deg_c = mpu6050_data.temperature_deg_c;
-    sequence_after = mpu6050_data_sequence;
-    if (sequence_before == sequence_after)
-    {
-      break;
-    }
-  }
-} 
+/* Re-initialising I2C2 stops a running DMA (MspDeInit) and clears a stuck HAL
+ * state, the same recovery the OLED link uses on I2C1. */
+static void ResetBus(void)
+{
+    (void)HAL_I2C_DeInit(&hi2c2);
+    (void)HAL_I2C_Init(&hi2c2);
+}
 
 void MPU6050_GyroCalibrationStart(void)
 {
-  mpu6050_gyro_offset_dps[0] = 0.0F;
-  mpu6050_gyro_offset_dps[1] = 0.0F;
-  mpu6050_gyro_offset_dps[2] = 0.0F;
-  mpu6050_gyro_calibration_sum_dps[0] = 0.0F;
-  mpu6050_gyro_calibration_sum_dps[1] = 0.0F;
-  mpu6050_gyro_calibration_sum_dps[2] = 0.0F;
-  mpu6050_gyro_calibration_count = 0U;
-  mpu6050_gyro_calibration_active = 1U;
+    memset(gyro_sum, 0, sizeof(gyro_sum));
+    memset(gyro_offset, 0, sizeof(gyro_offset));
+    calibration_count = 0U;
+    calibration_active = 1U;
 }
 
 uint8_t MPU6050_GyroCalibrationIsComplete(void)
 {
-  return (mpu6050_gyro_calibration_active == 0U) ? 1U : 0U;
+    return (calibration_active == 0U &&
+            calibration_count == MPU6050_GYRO_CALIBRATION_SAMPLES);
 }
 
-void MPU6050_Update(void)
+HAL_StatusTypeDef MPU6050_Init(void)
 {
-  mpu6050_raw_data.accel_x = MPU6050_CombineBytes(mpu6050_rx_buffer[0], mpu6050_rx_buffer[1]);
-  mpu6050_raw_data.accel_y = MPU6050_CombineBytes(mpu6050_rx_buffer[2], mpu6050_rx_buffer[3]);
-  mpu6050_raw_data.accel_z = MPU6050_CombineBytes(mpu6050_rx_buffer[4], mpu6050_rx_buffer[5]);
-  mpu6050_raw_data.temperature = MPU6050_CombineBytes(mpu6050_rx_buffer[6], mpu6050_rx_buffer[7]);
-  mpu6050_raw_data.gyro_x = MPU6050_CombineBytes(mpu6050_rx_buffer[8], mpu6050_rx_buffer[9]);
-  mpu6050_raw_data.gyro_y = MPU6050_CombineBytes(mpu6050_rx_buffer[10], mpu6050_rx_buffer[11]);
-  mpu6050_raw_data.gyro_z = MPU6050_CombineBytes(mpu6050_rx_buffer[12], mpu6050_rx_buffer[13]);
+    uint8_t id;
+    dma_state = 0U;
+    if (WriteRegister(REG_PWR_MGMT_1, 0x80U) != HAL_OK) return HAL_ERROR;
+    HAL_Delay(100U); /* Register map: allow 100 ms for the device reset. */
+    if (ReadRegister(REG_WHO_AM_I, &id) != HAL_OK || id != WHO_AM_I_VALUE) return HAL_ERROR;
 
-  mpu6050_data_sequence++;
-  MPU6050_ConvertUnits();
-  mpu6050_data_sequence++;
-  mpu6050_dma_busy = 0U;
+    if (Configure(REG_PWR_MGMT_1, 0x01U) != HAL_OK || /* Wake, PLL on gyro X */
+        Configure(REG_SMPLRT_DIV, 0x00U) != HAL_OK ||
+        Configure(REG_CONFIG, 0x03U) != HAL_OK || /* DLPF 42 Hz gyro, 1 kHz rate */
+        Configure(REG_GYRO_CONFIG, 0x08U) != HAL_OK || /* 500 dps */
+        Configure(REG_ACCEL_CONFIG, 0x10U) != HAL_OK) /* 8 g */
+        return HAL_ERROR;
+    MPU6050_GyroCalibrationStart();
+    return HAL_OK;
 }
 
-void MPU6050_I2CErrorCallback(void)
+HAL_StatusTypeDef MPU6050_EnableDataReadyInterrupt(void)
 {
-  mpu6050_dma_busy = 0U;
+    uint8_t status;
+    /* Any read clears INT_STATUS (INT_RD_CLEAR), so drain a stale bit first. */
+    if (ReadRegister(REG_INT_STATUS, &status) != HAL_OK) return HAL_ERROR;
+    /* INT: push-pull, active high, 50 us pulse, then DATA_RDY enabled. */
+    if (Configure(REG_INT_PIN_CFG, 0x10U) != HAL_OK) return HAL_ERROR;
+    return Configure(REG_INT_ENABLE, 0x01U);
 }
 
-static HAL_StatusTypeDef MPU6050_WriteRegister(uint8_t reg, uint8_t value)
+uint8_t MPU6050_IsBusy(void)
 {
-  return HAL_I2C_Mem_Write(&hi2c2, MPU6050_I2C_ADDRESS, reg,
-                           I2C_MEMADD_SIZE_8BIT, &value, 1U, 100U);
+    return dma_state != 0U;
 }
 
-static int16_t MPU6050_CombineBytes(uint8_t msb, uint8_t lsb)
+HAL_StatusTypeDef MPU6050_StartDmaRead(void)
 {
-  return (int16_t)(((uint16_t)msb << 8U) | (uint16_t)lsb);
-}
-
-static void MPU6050_ConvertUnits(void)
-{
-  float gyro_x_dps;
-  float gyro_y_dps;
-  float gyro_z_dps;
-
-  mpu6050_data.acc_g[0] = ((float)mpu6050_raw_data.accel_x / MPU6050_ACCEL_LSB_PER_G)
-                        - MPU6050_ACCEL_X_OFFSET_G;
-  mpu6050_data.acc_g[1] = ((float)mpu6050_raw_data.accel_y / MPU6050_ACCEL_LSB_PER_G)
-                        - MPU6050_ACCEL_Y_OFFSET_G;
-  mpu6050_data.acc_g[2] = ((float)mpu6050_raw_data.accel_z / MPU6050_ACCEL_LSB_PER_G)
-                        - MPU6050_ACCEL_Z_OFFSET_G;
-  mpu6050_data.temperature_deg_c = ((float)mpu6050_raw_data.temperature / MPU6050_TEMP_LSB_PER_DEG_C) + MPU6050_TEMP_OFFSET_DEG_C;
-  gyro_x_dps = (float)mpu6050_raw_data.gyro_x / MPU6050_GYRO_LSB_PER_DPS;
-  gyro_y_dps = (float)mpu6050_raw_data.gyro_y / MPU6050_GYRO_LSB_PER_DPS;
-  gyro_z_dps = (float)mpu6050_raw_data.gyro_z / MPU6050_GYRO_LSB_PER_DPS;
-
-  if (mpu6050_gyro_calibration_active != 0U)
-  {
-    mpu6050_gyro_calibration_sum_dps[0] += gyro_x_dps;
-    mpu6050_gyro_calibration_sum_dps[1] += gyro_y_dps;
-    mpu6050_gyro_calibration_sum_dps[2] += gyro_z_dps;
-    mpu6050_gyro_calibration_count++;
-
-    if (mpu6050_gyro_calibration_count >= MPU6050_GYRO_CALIBRATION_SAMPLE_COUNT)
+    if (dma_state != 0U) return HAL_BUSY;
+    dma_started_ms = HAL_GetTick();
+    dma_state = 1U;
+    if (HAL_I2C_Mem_Read_DMA(&hi2c2, MPU6050_ADDRESS, REG_INT_STATUS,
+                             I2C_MEMADD_SIZE_8BIT, dma_rx, FRAME_BYTES) != HAL_OK)
     {
-      mpu6050_gyro_offset_dps[0] = mpu6050_gyro_calibration_sum_dps[0] / MPU6050_GYRO_CALIBRATION_SAMPLE_COUNT;
-      mpu6050_gyro_offset_dps[1] = mpu6050_gyro_calibration_sum_dps[1] / MPU6050_GYRO_CALIBRATION_SAMPLE_COUNT;
-      mpu6050_gyro_offset_dps[2] = mpu6050_gyro_calibration_sum_dps[2] / MPU6050_GYRO_CALIBRATION_SAMPLE_COUNT;
-      mpu6050_gyro_calibration_active = 0U;
+        /* HAL may already have claimed the bus: reset it in main. */
+        dma_state = 3U;
+        return HAL_ERROR;
     }
-  }
+    return HAL_OK;
+}
 
-  mpu6050_data.gyro_dps[0] = gyro_x_dps - mpu6050_gyro_offset_dps[0];
-  mpu6050_data.gyro_dps[1] = gyro_y_dps - mpu6050_gyro_offset_dps[1];
-  mpu6050_data.gyro_dps[2] = gyro_z_dps - mpu6050_gyro_offset_dps[2];
+void MPU6050_DmaCompleteCallback(void)
+{
+    if (dma_state == 1U) dma_state = 2U;
+}
+
+void MPU6050_ErrorCallback(void)
+{
+    if (dma_state == 1U) dma_state = 3U;
+}
+
+HAL_StatusTypeDef MPU6050_Consume(IMU_Data_t *data)
+{
+    int16_t accel[3], gyro[3];
+    IMU_Data_t sample;
+    if (data == NULL) return HAL_ERROR;
+    if (dma_state == 3U || ((dma_state == 1U || dma_state == 2U) &&
+        (uint32_t)(HAL_GetTick() - dma_started_ms) >= DMA_TIMEOUT_MS))
+    {
+        ResetBus();
+        dma_state = 0U;
+        return HAL_ERROR;
+    }
+    if (dma_state != 2U) return HAL_BUSY;
+    /* Only main starts DMA, so releasing here cannot overwrite this buffer
+     * during parsing. EXTI merely sets the application flag. */
+    dma_state = 0U;
+    /* A repeated EXTI flag must not count the same sample twice. */
+    if (!(dma_rx[0] & INT_STATUS_DATA_RDY)) return HAL_BUSY;
+    for (uint8_t i = 0; i < 3U; ++i)
+    {
+        accel[i] = SignedBE(&dma_rx[FRAME_ACCEL + 2U * i]);
+        gyro[i] = SignedBE(&dma_rx[FRAME_GYRO + 2U * i]);
+        if (accel[i] == INT16_MIN || gyro[i] == INT16_MIN) return HAL_ERROR;
+    }
+    if (calibration_active)
+    {
+        for (uint8_t i = 0; i < 3U; ++i) gyro_sum[i] += gyro[i];
+        if (++calibration_count == MPU6050_GYRO_CALIBRATION_SAMPLES)
+        {
+            for (uint8_t i = 0; i < 3U; ++i)
+                gyro_offset[i] = (float)gyro_sum[i] /
+                    ((float)MPU6050_GYRO_CALIBRATION_SAMPLES * GYRO_LSB_PER_DPS);
+            calibration_active = 0U;
+        }
+    }
+    /* Native chip axes, as before; map to body axes once the PCB orientation
+     * is checked on the bench. */
+    sample.acc_g[0] = (float)accel[0] / ACCEL_LSB_PER_G - ACCEL_X_OFFSET_G;
+    sample.acc_g[1] = (float)accel[1] / ACCEL_LSB_PER_G - ACCEL_Y_OFFSET_G;
+    sample.acc_g[2] = (float)accel[2] / ACCEL_LSB_PER_G - ACCEL_Z_OFFSET_G;
+    for (uint8_t i = 0; i < 3U; ++i)
+        sample.gyro_dps[i] = (float)gyro[i] / GYRO_LSB_PER_DPS - gyro_offset[i];
+    sample.temperature_deg_c = (float)SignedBE(&dma_rx[FRAME_TEMP]) / TEMP_LSB_PER_DEG_C +
+                               TEMP_OFFSET_DEG_C;
+    *data = sample;
+    return HAL_OK;
 }

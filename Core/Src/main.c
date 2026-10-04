@@ -18,7 +18,6 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "adc.h"
 #include "dma.h"
 #include "i2c.h"
 #include "spi.h"
@@ -29,7 +28,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "baremetal.h"
-#include "icm42688.h"
+#include "mpu6050.h"
 #include "OLED.h"
 #include "remote_task.h"
 #include "motor.h"
@@ -98,19 +97,18 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_ADC1_Init();
   MX_DMA_Init();
   MX_I2C1_Init();
+  MX_I2C2_Init();
   MX_SPI1_Init();
-  MX_SPI2_Init();
   MX_TIM2_Init();
   MX_TIM3_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
   static NRF24_RX_Handle_t nrf_config = {
     .hspi = &hspi1,
-    .csn_gpio_port = GPIOA, .csn_pin = GPIO_PIN_4,
-    .ce_gpio_port  = GPIOB, .ce_pin  = GPIO_PIN_10,
+    .csn_gpio_port = NRF_CSN_GPIO_Port, .csn_pin = NRF_CSN_Pin,
+    .ce_gpio_port  = NRF_CE_GPIO_Port,  .ce_pin  = NRF_CE_Pin,
   };
 
   if (BareMetal_Init(&nrf_config) != HAL_OK)
@@ -178,33 +176,35 @@ void SystemClock_Config(void)
 
 /* USER CODE BEGIN 4 */
 
-void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
+void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c)
 {
-  if (hspi == &hspi2) ICM42688_DmaCompleteCallback();
-}
-
-void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
-{
-  if (hspi == &hspi2) ICM42688_ErrorCallback();
+  if (hi2c == &hi2c2)
+  {
+    MPU6050_DmaCompleteCallback();
+  }
 }
 
 void HAL_I2C_MasterTxCpltCallback(I2C_HandleTypeDef *hi2c)
 {
-  if (hi2c == &hi2c1) OLED_I2CTxCpltCallback();
+  if (hi2c == &hi2c1)
+  {
+    OLED_I2CTxCpltCallback();
+  }
 }
 
 void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c)
 {
   if (hi2c == &hi2c1) OLED_I2CErrorCallback();
+  else if (hi2c == &hi2c2) MPU6050_ErrorCallback();
 }
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-  if (GPIO_Pin == ICM42688_INT_PIN)
+  if (GPIO_Pin == MPU6050_INT_PIN)
   {
     ++g_imu_drdy_count;
-    if (ICM42688_Ready != 0U) ++g_imu_coalesced_count;
-    ICM42688_Ready = 1U;
+    if (MPU6050_Ready != 0U) ++g_imu_coalesced_count;
+    MPU6050_Ready = 1U;
   }
   else if (GPIO_Pin == REMOTE_NRF24_IRQ_PIN)
   {

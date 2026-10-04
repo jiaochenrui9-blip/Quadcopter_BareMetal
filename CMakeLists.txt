@@ -48,7 +48,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     User/Control/PID.c
     User/Control/mixer.c
     User/Estimate/attitude.c
-    User/Device/icm42688.c
+    User/Device/mpu6050.c
     User/Device/OLED.c
     User/Device/OLED_Data.c
     User/Device/motor.c

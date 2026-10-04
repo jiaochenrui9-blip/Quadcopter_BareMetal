@@ -3,7 +3,7 @@
 
 #include "remote_task.h"
 
-extern volatile uint8_t ICM42688_Ready;
+extern volatile uint8_t MPU6050_Ready;
 extern volatile uint32_t g_imu_drdy_count;
 extern volatile uint32_t g_imu_coalesced_count;
 extern uint32_t g_imu_frame_count;

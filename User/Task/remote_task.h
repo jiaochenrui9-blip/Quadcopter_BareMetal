@@ -15,9 +15,9 @@ extern "C" {
 
 /* nRF24L01 IRQ line. The radio drives it low on RX_DR, so the EXTI triggers
  * on the falling edge. */
-#define REMOTE_NRF24_IRQ_PORT      GPIOB
-#define REMOTE_NRF24_IRQ_PIN       GPIO_PIN_11
-#define REMOTE_NRF24_IRQ_IRQn      EXTI15_10_IRQn
+#define REMOTE_NRF24_IRQ_PORT      NRF_IRQ_GPIO_Port
+#define REMOTE_NRF24_IRQ_PIN       NRF_IRQ_Pin
+#define REMOTE_NRF24_IRQ_IRQn      NRF_IRQ_EXTI_IRQn
 
 /* The link counts as lost after this long without an accepted frame. */
 #define REMOTE_LINK_TIMEOUT_MS     200U
